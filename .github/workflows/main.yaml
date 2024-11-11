@@ -1,0 +1,138 @@
+name: Build Android and iOS Libraries
+
+env:
+  # Capture groups within $TAG_FMT:
+  #   \1 => TAG       vX.Y.Z[.P]-build<N>
+  #   \2 => VERSION   vX.Y.Z[.P]
+  #   \3 => ignore    (captures dot, and last number-group in version)
+  #   \4 => BUILD     N
+  TAG_FMT: '^refs/tags/((v(.?[0-9]+){3,4})\-build([0-9]+))$'
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Android and iOS Libraries
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        rust-version: [ nightly ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Environment Variables with NO TAG
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          VERSION=v$(grep '^version' Cargo.toml | awk -F\" '{print $2}')
+          
+          echo APP_VERSION=${VERSION} >> $GITHUB_ENV
+          echo TAG=$VERSION-snapshot-$GITHUB_RUN_NUMBER >> $GITHUB_ENV
+          echo BUILD=${GITHUB_RUN_NUMBER} >> $GITHUB_ENV
+
+      - name: Prepare Environment Variables with TAG
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if ! echo "$GITHUB_REF" | grep -qE "$TAG_FMT"; then
+            echo "ERR: TAG must be in format: vX.Y.Z[.P]+build<N>"
+            exit 1
+          fi
+          
+          VERSION="$(echo "$GITHUB_REF" | sed -E "s|$TAG_FMT|\2|")"
+          
+          if ! grep ^version Cargo.toml | grep ${VERSION#v}; then
+            echo "ERR: Cargo.toml must contain version = \"${VERSION#v}\""
+            exit 1
+          fi
+          
+          echo APP_VERSION=${VERSION} >> $GITHUB_ENV
+          echo TAG=$(echo "$GITHUB_REF" | sed -E "s|$TAG_FMT|\1|") >> $GITHUB_ENV
+          echo BUILD=$(echo "$GITHUB_REF" | sed -E "s|$TAG_FMT|\4|") >> $GITHUB_ENV
+
+      - name: Print Environment Variables
+        run: |
+          echo "APP_VERSION=$APP_VERSION"
+          echo "TAG=$TAG"
+          echo "BUILD=$BUILD"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools ndk-bundle'
+
+      - name: Set up Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust-version }}
+
+      - name: Prepare Rust
+        run: |
+          brew install cargo-make
+          brew install cargo-nextest
+
+      - name: Build sqlite3
+        run: |
+          cargo make build-sqlite3
+
+      - name: Lint
+        run: |
+          cargo make clippy
+
+      - name: Test
+        run: |
+          cargo make nextest
+
+      - name: Build iOS
+        run: |
+          cargo make build-ios
+
+      - name: Build Android
+        run: |
+          cargo make build-android
+
+      - name: Archive
+        run: |
+          cargo make tarball
+          target=target/libssi_man_$TAG.tar.gz
+          mv target/libssi_man.tar.gz $target
+
+          echo "target=$target" >> $GITHUB_ENV
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ env.TAG }}
+          path: ${{ env.target }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.TAG }}
+          files: |
+            ${{ env.target }}

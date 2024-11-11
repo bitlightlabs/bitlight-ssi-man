@@ -1,5 +1,12 @@
 [toolchain]
 channel = "1.82.0"
 components = ["cargo", "clippy", "rustfmt"]
-targets = []
+targets = [
+    # iOS
+    "aarch64-apple-ios",
+    "x86_64-apple-ios",
+    # Android
+    "aarch64-linux-android",
+    "x86_64-linux-android"
+]
 profile = "minimal"
